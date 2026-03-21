@@ -1,10 +1,13 @@
 """
 Supervised fine-tuning (SFT) the model.
+监督微调（SFT）模型。
 Run as:
+运行方式：
 
 python -m scripts.chat_sft
 
 Or torchrun for training:
+或使用 torchrun 进行训练：
 
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16
 """

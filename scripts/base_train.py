@@ -1,13 +1,16 @@
 """
 Train model. From root directory of the project, run as:
+训练模型。从项目根目录运行：
 
 python -m scripts.base_train
 
 or distributed as:
+或分布式运行：
 
 torchrun --nproc_per_node=8 -m scripts.base_train
 
 If you are only on CPU/Macbook, you'll want to train a much much smaller LLM. Example:
+如果您只有 CPU/Macbook，您需要训练一个小得多的 LLM。例如：
 python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1 --eval-tokens=512 --core-metric-every=-1 --total-batch-size=512 --num-iterations=20
 """
 
@@ -85,6 +88,7 @@ user_config = vars(args).copy()  # for logging
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+                               # 此进程将进行日志记录、检查点保存等
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 if device_type == "cuda":
@@ -93,13 +97,16 @@ if device_type == "cuda":
     print0(f"GPU: {gpu_device_name} | Peak FLOPS (BF16): {gpu_peak_flops:.2e}")
 else:
     gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
+                                   # MFU 对 CPU/MPS 没有意义
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
+# wandb 日志初始化
 use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
 
 # Flash Attention status
+# Flash Attention 状态
 from nanochat.flash_attention import USE_FA3
 using_fa3 = USE_FA3
 if using_fa3:
@@ -118,6 +125,7 @@ else:
 
 # -----------------------------------------------------------------------------
 # Tokenizer will be useful for evaluation and also we need the vocab size to init the model
+# 分词器对评估有用，我们也需要词表大小来初始化模型
 tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
@@ -125,11 +133,15 @@ print0(f"Vocab size: {vocab_size:,}")
 
 # -----------------------------------------------------------------------------
 # Initialize the Model
+# 初始化模型
 
 def build_model_meta(depth):
     """Build a model on meta device for a given depth (shapes/dtypes only, no data)."""
+    """在 meta 设备上构建给定深度的模型（仅形状/数据类型，无数据）。"""
     # Model dim is nudged up to nearest multiple of head_dim for clean division
+    # 模型维度向上取整到 head_dim 的最近倍数以便干净除法
     # (FA3 requires head_dim divisible by 8, and this guarantees head_dim == args.head_dim exactly)
+    # （FA3 要求 head_dim 可被 8 整除，这确保 head_dim == args.head_dim 精确）
     base_dim = depth * args.aspect_ratio
     model_dim = ((base_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
     num_heads = model_dim // args.head_dim
@@ -143,14 +155,19 @@ def build_model_meta(depth):
     return model_meta
 
 # Build the model, move to device, init the weights
+# 构建模型，移动到设备，初始化权重
 model = build_model_meta(args.depth) # 1) Build on meta device (only shapes/dtypes, no data)
+                                     # 1) 在 meta 设备上构建（仅形状/数据类型，无数据）
 model_config = model.config
 model_config_kwargs = asdict(model_config)
 print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
 model.to_empty(device=device) # 2) All tensors get storage on target device but with uninitialized (garbage) data
+                              # 2) 所有张量在目标设备上获得存储但具有未初始化（垃圾）数据
 model.init_weights() # 3) All tensors get initialized
+                     # 3) 所有张量被初始化
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
+# 如果我们正在恢复，用检查点的参数覆盖模型参数
 base_dir = get_base_dir()
 output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
@@ -160,21 +177,26 @@ if resuming:
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
     model.load_state_dict(model_data, strict=True, assign=True)
     del model_data # free up this memory after the copy
+                   # 复制后释放此内存
 
 # -----------------------------------------------------------------------------
 # FP8 training initialization and management (this has to be done before torch.compile)
+# FP8 训练初始化和管理（必须在 torch.compile 之前完成）
 
 # Convert Linear layers to Float8Linear if --fp8 is set
+# 如果设置了 --fp8，将 Linear 层转换为 Float8Linear
 if args.fp8:
     if device_type != "cuda":
         print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
     else:
         # our custom fp8 is simpler than torchao, written for exact API compatibility
+        # 我们的自定义 fp8 比 torchao 更简单，为精确的 API 兼容性编写
         from nanochat.fp8 import Float8LinearConfig, convert_to_float8_training
         # from torchao.float8 import Float8LinearConfig, convert_to_float8_training
         import torch.nn as nn
 
         # Filter: dims must be divisible by 16 (FP8 hardware requirement) large enough
+        # 过滤器：维度必须可被 16 整除（FP8 硬件要求）且足够大
         def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
             if not isinstance(mod, nn.Linear):
                 return False
@@ -192,12 +214,16 @@ if args.fp8:
         print0(f"✓ FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8}/{num_linear} linear layers, skipped {num_skipped} (too small)")
 
 # Context manager to temporarily disable FP8 so that model evaluation remains in BF16
+# 临时禁用 FP8 的上下文管理器，以便模型评估保持在 BF16
 @contextmanager
 def disable_fp8(model):
     """Temporarily swap Float8Linear modules with nn.Linear for BF16 evaluation.
+    临时将 Float8Linear 模块交换为 nn.Linear 以进行 BF16 评估。
 
     CastConfig is a frozen dataclass, so we can't mutate scaling_type. Instead,
+    CastConfig 是一个冻结的 dataclass，所以我们不能修改 scaling_type。相反，
     we swap out Float8Linear modules entirely and restore them after.
+    我们完全交换 Float8Linear 模块并在之后恢复它们。
     """
     import torch.nn as nn
 
